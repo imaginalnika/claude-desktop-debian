@@ -87,7 +87,7 @@ echo "✓ Desktop entry created"
 echo "🚀 Creating launcher script..."
 cat > "$INSTALL_DIR/bin/claude-desktop" << EOF
 #!/bin/bash
-LOG_FILE="\$HOME/claude-desktop-launcher.log"
+LOG_FILE="/dev/null"
 echo "--- Claude Desktop Launcher Start ---" >> "\$LOG_FILE"
 echo "Timestamp: \$(date)" >> "\$LOG_FILE"
 echo "Arguments: \$@" >> "\$LOG_FILE"

@@ -119,7 +119,7 @@ fi
 cd "\$APPDIR/usr/lib" || exit 1
 
 # Define log file path in user's home directory
-LOG_FILE="\$HOME/claude-desktop-launcher.log"
+LOG_FILE="/dev/null"
 
 # Change to HOME directory before exec'ing Electron to avoid CWD permission issues
 cd "\$HOME" || exit 1
