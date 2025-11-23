@@ -4,33 +4,37 @@ set -euo pipefail
 # --- Architecture Detection ---
 echo -e "\033[1;36m--- Architecture Detection ---\033[0m"
 echo "⚙️ Detecting system architecture..."
-HOST_ARCH=$(dpkg --print-architecture)
-echo "Detected host architecture: $HOST_ARCH"
-cat /etc/os-release && uname -m && dpkg --print-architecture
+ARCH_RAW=$(uname -m)
+cat /etc/os-release && uname -m
 
-# Set variables based on detected architecture
-if [ "$HOST_ARCH" = "amd64" ]; then
+case "$ARCH_RAW" in
+    x86_64)
+        ARCHITECTURE="amd64"
+        ;;
+    aarch64|arm64)
+        ARCHITECTURE="arm64"
+        ;;
+    *)
+        echo "❌ Unsupported architecture: $ARCH_RAW. This script currently supports amd64 and arm64."
+        exit 1
+        ;;
+esac
+
+if [ "$ARCHITECTURE" = "amd64" ]; then
     CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-x64/Claude-Setup-x64.exe"
-    ARCHITECTURE="amd64"
     CLAUDE_EXE_FILENAME="Claude-Setup-x64.exe"
     echo "Configured for amd64 build."
-elif [ "$HOST_ARCH" = "arm64" ]; then
+elif [ "$ARCHITECTURE" = "arm64" ]; then
     CLAUDE_DOWNLOAD_URL="https://storage.googleapis.com/osprey-downloads-c02f6a0d-347c-492b-a752-3e0651722e97/nest-win-arm64/Claude-Setup-arm64.exe"
-    ARCHITECTURE="arm64"
     CLAUDE_EXE_FILENAME="Claude-Setup-arm64.exe"
     echo "Configured for arm64 build."
 else
-    echo "❌ Unsupported architecture: $HOST_ARCH. This script currently supports amd64 and arm64."
+    echo "❌ Unsupported architecture: $ARCHITECTURE"
     exit 1
 fi
-echo "Target Architecture (detected): $ARCHITECTURE" # Renamed echo
 echo -e "\033[1;36m--- End Architecture Detection ---\033[0m"
 
 
-if [ ! -f "/etc/debian_version" ]; then
-    echo "❌ This script requires a Debian-based Linux distribution"
-    exit 1
-fi
 
 if [ "$EUID" -eq 0 ]; then
    echo "❌ This script should not be run using sudo or as the root user."
@@ -73,14 +77,22 @@ fi # End of if [ -d "$ORIGINAL_HOME/.nvm" ] check
 
 echo "System Information:"
 echo "Distribution: $(grep "PRETTY_NAME" /etc/os-release | cut -d'"' -f2)"
-echo "Debian version: $(cat /etc/debian_version)"
+if [ -f "/etc/debian_version" ]; then
+    echo "Debian version: $(cat /etc/debian_version)"
+fi
 echo "Target Architecture: $ARCHITECTURE" 
 PACKAGE_NAME="claude-desktop"
 MAINTAINER="Claude Desktop Linux Maintainers"
 DESCRIPTION="Claude Desktop for Linux"
-PROJECT_ROOT="$(pwd)" WORK_DIR="$PROJECT_ROOT/build" APP_STAGING_DIR="$WORK_DIR/electron-app" VERSION="" 
+PROJECT_ROOT="$(pwd)" WORK_DIR="$PROJECT_ROOT/build" APP_STAGING_DIR="$WORK_DIR/electron-app" VERSION=""
 echo -e "\033[1;36m--- Argument Parsing ---\033[0m"
-BUILD_FORMAT="deb"    CLEANUP_ACTION="yes"  TEST_FLAGS_MODE=false
+if [ -f "/etc/debian_version" ] || grep -qiE 'ID_LIKE=.*(debian|ubuntu)' /etc/os-release 2>/dev/null; then
+    BUILD_FORMAT="deb"
+else
+    BUILD_FORMAT="appimage"
+fi
+CLEANUP_ACTION="yes"
+TEST_FLAGS_MODE=false
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
@@ -100,7 +112,7 @@ while [[ $# -gt 0 ]]; do
         ;;
         -h|--help)
         echo "Usage: $0 [--build deb|appimage] [--clean yes|no] [--test-flags]"
-        echo "  --build: Specify the build format (deb or appimage). Default: deb"
+        echo "  --build: Specify the build format (deb or appimage). Default: auto-detect (deb on Debian/Ubuntu, appimage on others)"
         echo "  --clean: Specify whether to clean intermediate build files (yes or no). Default: yes"
         echo "  --test-flags: Parse flags, print results, and exit without building."
         exit 0
@@ -153,11 +165,55 @@ check_command() {
     fi
 }
 
+PKG_MGR=""
+if command -v apt &> /dev/null; then
+    PKG_MGR="apt"
+elif command -v dnf &> /dev/null; then
+    PKG_MGR="dnf"
+elif command -v zypper &> /dev/null; then
+    PKG_MGR="zypper"
+elif command -v pacman &> /dev/null; then
+    PKG_MGR="pacman"
+fi
+
+map_package_name() {
+    local cmd="$1"
+    case "$PKG_MGR" in
+        apt)
+            case "$cmd" in
+                "p7zip") echo "p7zip-full" ;;
+                "wget") echo "wget" ;;
+                "wrestool"|"icotool") echo "icoutils" ;;
+                "convert") echo "imagemagick" ;;
+                "dpkg-deb") echo "dpkg-dev" ;;
+            esac
+            ;;
+        dnf|zypper)
+            case "$cmd" in
+                "p7zip") echo "p7zip" ;;
+                "wget") echo "wget" ;;
+                "wrestool"|"icotool") echo "icoutils" ;;
+                "convert") echo "ImageMagick" ;;
+                "dpkg-deb") echo "" ;;
+            esac
+            ;;
+        pacman)
+            case "$cmd" in
+                "p7zip") echo "p7zip" ;;
+                "wget") echo "wget" ;;
+                "wrestool"|"icotool") echo "icoutils" ;;
+                "convert") echo "imagemagick" ;;
+                "dpkg-deb") echo "" ;;
+            esac
+            ;;
+    esac
+}
+
 echo "Checking dependencies..."
 DEPS_TO_INSTALL=""
 COMMON_DEPS="p7zip wget wrestool icotool convert"
 DEB_DEPS="dpkg-deb"
-APPIMAGE_DEPS="" 
+APPIMAGE_DEPS=""
 ALL_DEPS_TO_CHECK="$COMMON_DEPS"
 if [ "$BUILD_FORMAT" = "deb" ]; then
     ALL_DEPS_TO_CHECK="$ALL_DEPS_TO_CHECK $DEB_DEPS"
@@ -167,34 +223,48 @@ fi
 
 for cmd in $ALL_DEPS_TO_CHECK; do
     if ! check_command "$cmd"; then
-        case "$cmd" in
-            "p7zip") DEPS_TO_INSTALL="$DEPS_TO_INSTALL p7zip-full" ;;
-            "wget") DEPS_TO_INSTALL="$DEPS_TO_INSTALL wget" ;;
-            "wrestool"|"icotool") DEPS_TO_INSTALL="$DEPS_TO_INSTALL icoutils" ;;
-            "convert") DEPS_TO_INSTALL="$DEPS_TO_INSTALL imagemagick" ;;
-            "dpkg-deb") DEPS_TO_INSTALL="$DEPS_TO_INSTALL dpkg-dev" ;;
-        esac
+        pkg=$(map_package_name "$cmd")
+        if [ -n "$pkg" ]; then
+            DEPS_TO_INSTALL="$DEPS_TO_INSTALL $pkg"
+        fi
     fi
 done
 
 if [ -n "$DEPS_TO_INSTALL" ]; then
+    if [ -z "$PKG_MGR" ]; then
+        echo "❌ No supported package manager found (apt, dnf, zypper, pacman)"
+        echo "   Please install manually: $DEPS_TO_INSTALL"
+        exit 1
+    fi
+
     echo "System dependencies needed: $DEPS_TO_INSTALL"
-    echo "Attempting to install using sudo..."
-        if ! sudo -v; then
+    echo "Attempting to install using $PKG_MGR..."
+    if ! sudo -v; then
         echo "❌ Failed to validate sudo credentials. Please ensure you can run sudo."
         exit 1
     fi
-        if ! sudo apt update; then
-        echo "❌ Failed to run 'sudo apt update'."
+
+    case "$PKG_MGR" in
+        apt)
+            sudo apt update && sudo apt install -y $DEPS_TO_INSTALL
+            ;;
+        dnf)
+            sudo dnf install -y $DEPS_TO_INSTALL
+            ;;
+        zypper)
+            sudo zypper install -y $DEPS_TO_INSTALL
+            ;;
+        pacman)
+            sudo pacman -S --noconfirm $DEPS_TO_INSTALL
+            ;;
+    esac
+
+    if [ $? -eq 0 ]; then
+        echo "✓ System dependencies installed successfully"
+    else
+        echo "❌ Failed to install dependencies"
         exit 1
     fi
-    # Here on purpose no "" to expand the 'list', thus
-    # shellcheck disable=SC2086
-    if ! sudo apt install -y $DEPS_TO_INSTALL; then
-         echo "❌ Failed to install dependencies using 'sudo apt install'."
-         exit 1
-    fi
-    echo "✓ System dependencies installed successfully via sudo."
 fi
 
 rm -rf "$WORK_DIR"
@@ -729,8 +799,13 @@ echo "✓ app.asar processed and staged in $APP_STAGING_DIR"
 cd "$PROJECT_ROOT"
 
 echo -e "\033[1;36m--- Call Packaging Script ---\033[0m"
-FINAL_OUTPUT_PATH="" FINAL_DESKTOP_FILE_PATH="" 
+FINAL_OUTPUT_PATH="" FINAL_DESKTOP_FILE_PATH=""
 if [ "$BUILD_FORMAT" = "deb" ]; then
+    if ! command -v dpkg-deb &> /dev/null; then
+        echo "❌ dpkg-deb is required to build .deb packages but was not found"
+        echo "   On non-Debian systems, consider building AppImage instead: ./build.sh --build appimage"
+        exit 1
+    fi
     echo "📦 Calling Debian packaging script for $ARCHITECTURE..."
     chmod +x scripts/build-deb-package.sh
     if ! scripts/build-deb-package.sh \
